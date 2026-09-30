@@ -1,0 +1,56 @@
+# Auto-merges the NITT-IIT Weekly Status Dashboard routine's refresh PRs
+# (branches claude/amazing-mccarthy-*) so the live page updates after every
+# Mon/Wed/Fri run without a manual merge. Refuses anything that touches a
+# file other than index.html — those PRs are left open for a human.
+name: Auto-merge dashboard refresh PRs
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  pages: write
+
+jobs:
+  automerge:
+    if: >-
+      startsWith(github.head_ref, 'claude/amazing-mccarthy-') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      BRANCH: ${{ github.head_ref }}
+    steps:
+      - name: Require index.html to be the only changed file
+        run: |
+          files=$(gh pr diff "$PR" -R "$REPO" --name-only)
+          echo "Changed files:"; echo "$files"
+          if [ "$files" != "index.html" ]; then
+            echo "::error::PR #$PR changes files other than index.html; leaving it for manual review."
+            exit 1
+          fi
+
+      - name: Close older open refresh PRs
+        run: |
+          gh pr list -R "$REPO" --state open --json number,headRefName \
+            --jq '.[] | select(.headRefName | startswith("claude/amazing-mccarthy-")) | "\(.number) \(.headRefName)"' |
+          while read -r n ref; do
+            [ "$n" -lt "$PR" ] || continue
+            gh pr close "$n" -R "$REPO" -c "Superseded by #$PR (auto-merge workflow)."
+            gh api -X DELETE "repos/$REPO/git/refs/heads/$ref" || true
+          done
+
+      - name: Merge
+        run: |
+          gh pr merge "$PR" -R "$REPO" --merge
+          gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH" || true
+
+      - name: Request a Pages rebuild
+        run: |
+          gh api -X POST "repos/$REPO/pages/builds" \
+            || echo "::warning::Pages build request failed; the push to main may still trigger one."
